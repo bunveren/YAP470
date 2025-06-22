@@ -1,0 +1,2 @@
+models/Dfire_hybrid_svm_best_model_Scaled_All_CNN.pkl filter=lfs diff=lfs merge=lfs -text
+models/Dfire_hybrid_custom_mlp_best_model_Scaled_All_CNN.keras filter=lfs diff=lfs merge=lfs -text
