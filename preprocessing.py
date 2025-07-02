@@ -137,7 +137,7 @@ def load_prep_dfire(split_root_path, target_size, fire_class_ids,
              images_without_fire += 1
 
     print(f"\ntoplam islenen: {total_images_processed} atlanan: {total_images_skipped}")
-    print(f"yangin Var (1): {images_with_fire}, yok (0): {images_without_fire}")
+    print(f"yangin var (1): {images_with_fire}, yok (0): {images_without_fire}")
 
     output_dtype = np.float32 if normalize else np.uint8
 
@@ -155,10 +155,91 @@ def load_prep_dfire(split_root_path, target_size, fire_class_ids,
     return numpy_data     
   
   
-def extract_color_histograms(img_processed, color_space, bins): return
-def extract_lbp_features(img_gray, radius, n_points, method): return      
-def extract_hog_features(img_gray, orientations, pixels_per_cell, cells_per_block, block_norm): return
-def combine_features(img_dict, feature_params): return
+def extract_color_histograms(img_processed, color_space, bins):
+    histograms = []
+    if color_space == 'hsv':
+        if img_processed.dtype == np.float32:
+            hist_h = cv2.calcHist([img_processed], [0], None, [bins], [0, 360])
+            hist_s = cv2.calcHist([img_processed], [1], None, [bins], [0, 1])
+            histograms.extend([hist_h.flatten(), hist_s.flatten()]) 
+        elif img_processed.dtype == np.uint8:
+            hist_h = cv2.calcHist([img_processed], [0], None, [bins], [0, 180])
+            hist_s = cv2.calcHist([img_processed], [1], None, [bins], [0, 256])
+            histograms.extend([hist_h.flatten(), hist_s.flatten()]) 
+    elif color_space == 'ycbcr':
+        if img_processed.dtype == np.float32:
+            hist_y = cv2.calcHist([img_processed], [0], None, [bins], [0, 1])
+            hist_cb = cv2.calcHist([img_processed], [1], None, [bins], [-0.5, 0.5])
+            hist_cr = cv2.calcHist([img_processed], [2], None, [bins], [-0.5, 0.5])
+            histograms.extend([hist_y.flatten(), hist_cb.flatten(), hist_cr.flatten()])
+        elif img_processed.dtype == np.uint8:
+            hist_y = cv2.calcHist([img_processed], [0], None, [bins], [0, 256])
+            hist_cb = cv2.calcHist([img_processed], [1], None, [bins], [0, 256])
+            hist_cr = cv2.calcHist([img_processed], [2], None, [bins], [0, 256])
+            histograms.extend([hist_y.flatten(), hist_cb.flatten(), hist_cr.flatten()])
+
+    if histograms: return np.concatenate(histograms)
+    else: return np.array([]) 
+
+
+def extract_lbp_features(img_gray, radius, n_points, method):
+    if n_points is None:
+        n_points = 8 * radius
+    lbp_image = local_binary_pattern(img_gray, n_points, radius, method=method)
+    if method == 'uniform':
+        n_bins = n_points + 2
+    else:
+         n_bins = int(lbp_image.max() + 1)
+    lbp_hist, _ = np.histogram(lbp_image.ravel(), bins=n_bins, range=(0, n_bins))
+    lbp_hist = lbp_hist.astype(np.float32)
+    if lbp_hist.sum() > 0:
+        lbp_hist /= lbp_hist.sum()
+    return lbp_hist.flatten()
+
+
+def extract_hog_features(img_gray, orientations, pixels_per_cell, cells_per_block, block_norm):
+    hog_features = hog(img_gray, orientations=orientations,
+                       pixels_per_cell=pixels_per_cell,
+                       cells_per_block=cells_per_block,
+                       block_norm=block_norm,
+                       visualize=False, feature_vector=True)
+    return hog_features.flatten() 
+
+
+def combine_features(img_dict, feature_params):
+    all_features = []
+    if 'hsv' in img_dict:
+        hsv_hist = extract_color_histograms(img_dict['hsv'], 'hsv', bins=feature_params.get('hist_bins', 100))
+        if hsv_hist.size > 0:
+            all_features.append(hsv_hist)
+    if 'ycbcr' in img_dict:
+         ycbcr_hist = extract_color_histograms(img_dict['ycbcr'], 'ycbcr', bins=feature_params.get('hist_bins', 100))
+         if ycbcr_hist.size > 0:
+              all_features.append(ycbcr_hist)
+
+    if 'gray' in img_dict:
+        img_gray_processed = img_dict['gray'] 
+
+        lbp_features = extract_lbp_features(img_gray_processed,
+                                            radius=feature_params.get('lbp_radius', 3),
+                                            n_points=feature_params.get('lbp_n_points', None),
+                                            method=feature_params.get('lbp_method', 'uniform'))
+        if lbp_features.size > 0:
+             all_features.append(lbp_features)
+
+        hog_features = extract_hog_features(img_gray_processed,
+                                           orientations=feature_params.get('hog_orientations', 9),
+                                           pixels_per_cell=feature_params.get('hog_pixels_per_cell', (8, 8)),
+                                           cells_per_block=feature_params.get('hog_cells_per_block', (2, 2)),
+                                           block_norm=feature_params.get('hog_block_norm', 'L2-Hys'))
+        if hog_features.size > 0:
+             all_features.append(hog_features)
+
+    if all_features:
+        combined_vector = np.concatenate(all_features)
+        return combined_vector
+    else:
+        return np.array([])
 
                
 if __name__ == "__main__":
@@ -168,6 +249,35 @@ if __name__ == "__main__":
     if os.path.exists(data_root):
         processed_data_dict = load_prep_img(data_root, target_img_size, color_spaces=['bgr', 'hsv', 'ycbcr'], normalize=1)
     
+    if processed_data_dict:
+        features = []
+        labels = processed_data_dict['labels'] 
+        feature_params = {
+                'hist_bins': 100,
+                'lbp_radius': 3,
+                'lbp_n_points': None,
+                'lbp_method': 'uniform',
+                'hog_orientations': 9,
+                'hog_pixels_per_cell': (8, 8),
+                'hog_cells_per_block': (2, 2),
+                'hog_block_norm': 'L2-Hys'
+            }
+
+        num_images = len(labels)
+        if num_images > 0:
+            for i in tqdm(range(num_images), desc=f"Extracting Features {data_root}"):
+                img_dict_single = {}
+                for cs in processed_data_dict.keys():
+                    if cs != 'labels' and i < len(processed_data_dict[cs]): 
+                        img_dict_single[cs] = processed_data_dict[cs][i]
+                features_single = combine_features(img_dict_single, feature_params)
+                if features_single.size > 0:
+                    features.append(features_single)
+                else: pass # TODO
+            features_array = np.array(features)
+            print(f"\n{data_root} feat arr: {features_array.shape}")
+            print(f"{data_root} labels: {labels.shape}")
+
     data_root = ("Fire-Detection-Dataset")
     if os.path.exists(data_root):
         processed_data_dict = load_prep_img(
