@@ -153,6 +153,13 @@ def load_prep_dfire(split_root_path, target_size, fire_class_ids,
                   
     numpy_data['labels'] = np.array(labels) 
     return numpy_data     
+  
+  
+def extract_color_histograms(img_processed, color_space, bins): return
+def extract_lbp_features(img_gray, radius, n_points, method): return      
+def extract_hog_features(img_gray, orientations, pixels_per_cell, cells_per_block, block_norm): return
+def combine_features(img_dict, feature_params): return
+
                
 if __name__ == "__main__":
     data_root = ("fire_dataset")
@@ -169,6 +176,7 @@ if __name__ == "__main__":
             color_spaces=['bgr', 'hsv', 'ycbcr'], 
             normalize=1)
 
+"""
     dfire_root = "D-Fire" 
     target_img_size = (128, 128)
     fire_classes_ids = [1, 2]
@@ -184,3 +192,4 @@ if __name__ == "__main__":
             color_spaces=['bgr', 'hsv', 'ycbcr'],
             normalize=1 
         )
+"""
