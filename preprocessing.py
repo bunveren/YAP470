@@ -3,7 +3,11 @@ import os
 import numpy as np
 from tqdm import tqdm
 from skimage.feature import local_binary_pattern, hog
-from skimage.color import rgb2gray
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+import time
 
 def load_prep_img(data_root, target_size, 
     color_spaces=['bgr', 'hsv', 'ycbcr'], normalize=1):
@@ -241,65 +245,255 @@ def combine_features(img_dict, feature_params):
     else:
         return np.array([])
 
-               
-if __name__ == "__main__":
-    data_root = ("fire_dataset")
-    target_img_size = (128, 128)
+def get_config(dataset_choice):
+    config = {}
+    if dataset_choice == 'kaggle':
+        config['data_root'] = "fire_dataset"
+        config['target_img_size'] = (128, 128)
+        config['color_spaces_to_load'] = ['bgr', 'hsv', 'ycbcr']
+        config['normalize_pixels'] = 1
+        config['fire_class_ids'] = None 
+    elif dataset_choice == 'dfire':
+         config['dfire_root'] = "D-Fire" 
+         config['split_name'] = "train" 
+         config['data_root'] = os.path.join(config['dfire_root'], config['split_name'])
+         config['target_img_size'] = (128, 128)
+         config['color_spaces_to_load'] = ['bgr', 'hsv', 'ycbcr']
+         config['normalize_pixels'] = 1
+         config['fire_class_ids'] = [0, 1] 
+    else:
+        raise ValueError()
 
-    if os.path.exists(data_root):
-        processed_data_dict = load_prep_img(data_root, target_img_size, color_spaces=['bgr', 'hsv', 'ycbcr'], normalize=1)
-    
-    if processed_data_dict:
-        features = []
-        labels = processed_data_dict['labels'] 
-        feature_params = {
-                'hist_bins': 100,
-                'lbp_radius': 3,
-                'lbp_n_points': None,
-                'lbp_method': 'uniform',
-                'hog_orientations': 9,
-                'hog_pixels_per_cell': (8, 8),
-                'hog_cells_per_block': (2, 2),
-                'hog_block_norm': 'L2-Hys'
-            }
+    print(f"Using dataset: {dataset_choice}")
+    print(f"Data root: {config.get('data_root')}")
+    print(f"Target image size: {config['target_img_size']}")
+    print(f"Color spaces loaded: {config['color_spaces_to_load']}")
+    print(f"Normalize pixels: {bool(config['normalize_pixels'])}")
+    if dataset_choice == 'dfire':
+         print(f"D-Fire Split: {config['split_name']}")
+         print(f"D-Fire Fire Class IDs: {config['fire_class_ids']}")
+    return config
 
-        num_images = len(labels)
-        if num_images > 0:
-            for i in tqdm(range(num_images), desc=f"Extracting Features {data_root}"):
-                img_dict_single = {}
-                for cs in processed_data_dict.keys():
-                    if cs != 'labels' and i < len(processed_data_dict[cs]): 
-                        img_dict_single[cs] = processed_data_dict[cs][i]
+def get_feature_params():
+    feature_params = {
+        'hist_bins': 100,
+        'lbp_radius': 3,
+        'lbp_n_points': None, 
+        'lbp_method': 'uniform', # 'uniform', 'default', 'ror', 'nri_uniform'
+        'hog_orientations': 9,
+        'hog_pixels_per_cell': (8, 8),
+        'hog_cells_per_block': (2, 2),
+        'hog_block_norm': 'L2-Hys' # 'L2-Hys', 'L2', 'L1', 'L1-sqrt'
+    }
+    print("\nFeature extraction parameters:", feature_params)
+    return feature_params
+
+def load_and_preprocess_data(config):
+    data_root = config['data_root']
+    target_img_size = config['target_img_size']
+    color_spaces_to_load = config['color_spaces_to_load']
+    normalize_pixels = config['normalize_pixels']
+    dataset_choice = config.get('dataset_choice', 'kaggle')
+
+    processed_data_dict = None
+    if dataset_choice == 'kaggle':
+         if os.path.exists(data_root):
+            processed_data_dict = load_prep_img(
+                data_root,
+                target_img_size,
+                color_spaces=color_spaces_to_load,
+                normalize=normalize_pixels
+             )
+         else:
+              print(f"Kaggle dataset root not found at {data_root}")
+
+    elif dataset_choice == 'dfire':
+         fire_class_ids = config['fire_class_ids']
+         if os.path.exists(data_root):
+            processed_data_dict = load_prep_dfire(
+                data_root,
+                target_img_size,
+                fire_class_ids=fire_class_ids,
+                color_spaces=color_spaces_to_load,
+                normalize=normalize_pixels
+            )
+         else:
+            print(f"D-Fire split root not found at {data_root}")
+
+    if processed_data_dict and 'labels' in processed_data_dict and len(processed_data_dict['labels']) > 0:
+        print(f"\nSuccessfully loaded and preprocessed {len(processed_data_dict['labels'])} images.")
+    else:
+        raise ValueError()
+
+    return processed_data_dict
+
+
+def extract_features(processed_data_dict, feature_params):
+    features = []
+    valid_labels = []
+
+    if processed_data_dict and 'labels' in processed_data_dict and len(processed_data_dict['labels']) > 0:
+        labels_all = processed_data_dict['labels']
+        num_images_total = len(labels_all)
+        available_data_keys = [key for key in processed_data_dict.keys() if key != 'labels']
+
+        for i in tqdm(range(num_images_total), desc=f"Extracting Features"):
+            img_dict_single = {}
+            for key in available_data_keys:
+                 if processed_data_dict[key] is not None and i < len(processed_data_dict[key]):
+                      img_dict_single[key] = processed_data_dict[key][i]
+
+            if img_dict_single:
                 features_single = combine_features(img_dict_single, feature_params)
                 if features_single.size > 0:
                     features.append(features_single)
-                else: pass # TODO
-            features_array = np.array(features)
-            print(f"\n{data_root} feat arr: {features_array.shape}")
-            print(f"{data_root} labels: {labels.shape}")
+                    valid_labels.append(labels_all[i])
+                else:
+                    pass 
+            else:
+                pass 
+        features_array = np.array(features)
+        labels_array = np.array(valid_labels)
 
-    data_root = ("Fire-Detection-Dataset")
-    if os.path.exists(data_root):
-        processed_data_dict = load_prep_img(
-            data_root, 
-            target_img_size, 
-            color_spaces=['bgr', 'hsv', 'ycbcr'], 
-            normalize=1)
+        print(f"\ntotal featurei cikarilabilmis resim s.: {features_array.shape[0]}")
+        if features_array.shape[0] > 0:
+             print(f"feature arr shape: {features_array.shape}")
+             print(f"label arr shape: {labels_array.shape}")
+        else:
+             print("feature cikarilamadi!")
 
-"""
-    dfire_root = "D-Fire" 
-    target_img_size = (128, 128)
-    fire_classes_ids = [1, 2]
+        return features_array, labels_array
+    else:
+        print("feature cikarilamadi!")
+        return np.array([]), np.array([])
 
-    train_data_root = os.path.join(dfire_root, "train")
-    test_data_root = os.path.join(dfire_root, "test")
+def split_data(features_array, labels_array, test_size=0.2, random_state=42):
+    if features_array.shape[0] == 0:
+        print("feature arrayi bos!")
+        return None, None, None, None
 
-    if os.path.exists(train_data_root):
-        processed_data_dict = load_prep_dfire(
-            train_data_root,
-            target_img_size,
-            fire_classes_ids, 
-            color_spaces=['bgr', 'hsv', 'ycbcr'],
-            normalize=1 
-        )
-"""
+    print(f"\ntraining split: ({1-test_size:.0%}) testing split: ({test_size:.0%})")
+    X_train, X_test, y_train, y_test = train_test_split(
+        features_array,
+        labels_array,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=labels_array 
+    )
+
+    print(f"training features shape: {X_train.shape}")
+    print(f"testing features shape: {X_test.shape}")
+    print(f"training labels shape: {y_train.shape}")
+    print(f"testing labels shape: {y_test.shape}")
+
+    return X_train, X_test, y_train, y_test
+
+def scale_features(X_train, X_test):
+    if X_train is None or X_test is None or X_train.shape[0] == 0:
+         print("scale edilemedi! train ya da test data bos")
+         return None, None, None
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    return X_train_scaled, X_test_scaled, scaler
+
+def train_svm(X_train_scaled, y_train, C=1.0, gamma='scale', kernel='rbf'):
+    if X_train_scaled is None or y_train is None or X_train_scaled.shape[0] == 0:
+         print("svm train edilemedi! training data bos")
+         return None
+    svm_model = SVC(kernel=kernel, C=C, gamma=gamma, random_state=42)
+    start_time = time.time()
+    svm_model.fit(X_train_scaled, y_train)
+    end_time = time.time()
+    print(f"svm model training suresi: {end_time - start_time:.2f} saniye")
+
+    return svm_model
+
+def evaluate_model(model, X_test_scaled, y_test, model_name="Model"):
+    if model is None or X_test_scaled is None or y_test is None or X_test_scaled.shape[0] == 0:
+         print(f"{model_name} eval edilemedi! data bos")
+         return
+    y_pred = model.predict(X_test_scaled)
+    print(f"Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+    print(f"Precision: {precision_score(y_test, y_pred):.4f}")
+    print(f"Recall (Sensitivity): {recall_score(y_test, y_pred):.4f}")
+    print(f"F1 Score: {f1_score(y_test, y_pred):.4f}")
+    print(f"\nConfusion Matrix ({model_name}):")
+    print(confusion_matrix(y_test, y_pred))
+    print(f"\nclass report ({model_name}):")
+    print(classification_report(y_test, y_pred))
+
+def tune_svm_hyperparameters(X_train_scaled, y_train, param_grid):
+    if X_train_scaled is None or y_train is None or X_train_scaled.shape[0] == 0:
+         return None
+
+    grid_search = GridSearchCV(
+        SVC(random_state=42),
+        param_grid,
+        cv=StratifiedKFold(n_splits=5),
+        scoring='f1', 
+        n_jobs=-1,
+        verbose=2
+    )
+
+    start_time = time.time()
+    grid_search.fit(X_train_scaled, y_train)
+    end_time = time.time()
+    print(f"\nGridSearchCV {end_time - start_time:.2f} saniye surdu")
+    print("\nen iyi parametreler:")
+    print(grid_search.best_params_)
+    print("\nen iyi cv f1 skoru:")
+    print(grid_search.best_score_)
+
+    return grid_search
+
+def main():
+    dataset_choice = 'kaggle' 
+    try:
+        config = get_config(dataset_choice)
+    except ValueError:
+        return 
+    
+    feature_params = get_feature_params()
+
+    processed_data_dict = load_and_preprocess_data(config)
+    if processed_data_dict is None or processed_data_dict.get('labels', []).shape[0] == 0:
+        print("data load sorunu")
+        return 
+    
+    features_array, labels_array = extract_features(processed_data_dict, feature_params)
+    if features_array.shape[0] == 0:
+         print("feat exc sorunu")
+         return 
+
+    X_train, X_test, y_train, y_test = split_data(features_array, labels_array)
+    if X_train is None:
+         print("split sorunu")
+         return
+    
+    X_train_scaled, X_test_scaled, scaler = scale_features(X_train, X_test)
+    if X_train_scaled is None:
+         print("scaling sorunu")
+         return
+    initial_svm_model = train_svm(X_train_scaled, y_train)
+    if initial_svm_model:
+        evaluate_model(initial_svm_model, X_test_scaled, y_test, model_name="SVM")
+    else:
+         print("svm train sorunu")
+
+    param_grid = {
+        'C': [0.1, 1, 10, 100],
+        'gamma': ['scale', 'auto', 0.01, 0.1, 1],
+        'kernel': ['rbf', 'linear']
+    }
+    tuned_grid_search = tune_svm_hyperparameters(X_train_scaled, y_train, param_grid)
+
+    if tuned_grid_search:
+        best_svm_model = tuned_grid_search.best_estimator_
+        evaluate_model(best_svm_model, X_test_scaled, y_test, model_name="Tuned SVM (GridSearch)")
+    else:
+         print("hyper tuning sorunu")
+
+if __name__ == "__main__":
+    main()    
+    
