@@ -70,7 +70,7 @@ def load_prep_img(data_root, target_size,
 
     numpy_data['labels'] = np.array(labels)
     return numpy_data    
-                
+
 def load_prep_dfire(split_root_path, target_size, fire_class_ids,
     color_spaces=['bgr', 'hsv', 'ycbcr'], normalize=1):
     processed_data = {cs: [] for cs in color_spaces + ['gray']}
@@ -79,12 +79,11 @@ def load_prep_dfire(split_root_path, target_size, fire_class_ids,
     annotation_extension = '.txt' 
     images_dir = os.path.join(split_root_path, 'images')
     labels_dir = os.path.join(split_root_path, 'labels')
-
+    print("aa")
     if not os.path.isdir(images_dir):
         return None 
     if not os.path.isdir(labels_dir):
         return None 
-
     all_image_files = [f for f in os.listdir(images_dir) if os.path.splitext(f)[1].lower() in img_extensions]
     total_images_processed = 0
     total_images_skipped = 0
@@ -250,13 +249,13 @@ def get_config(dataset_choice):
         config['normalize_pixels'] = 1
         config['fire_class_ids'] = None 
     elif dataset_choice == 'dfire':
-         config['dfire_root'] = "D-Fire" 
-         config['split_name'] = "train" 
-         config['data_root'] = os.path.join(config['dfire_root'], config['split_name'])
-         config['target_img_size'] = (128, 128)
-         config['color_spaces_to_load'] = ['bgr', 'hsv', 'ycbcr']
-         config['normalize_pixels'] = 1
-         config['fire_class_ids'] = [0, 1] 
+        config['dfire_root'] = "D-Fire" 
+        config['split_name'] = "train" 
+        config['data_root'] = os.path.join(config['dfire_root'], config['split_name'])
+        config['target_img_size'] = (128, 128)
+        config['color_spaces_to_load'] = ['bgr', 'hsv', 'ycbcr']
+        config['normalize_pixels'] = 1
+        config['fire_class_ids'] = [0, 1] 
     else:
         raise ValueError()
 
