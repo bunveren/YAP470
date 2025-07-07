@@ -8,6 +8,7 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 import time
+from sklearn.decomposition import PCA
 
 def load_prep_img(data_root, target_size, 
     color_spaces=['bgr', 'hsv', 'ycbcr'], normalize=1):
@@ -69,8 +70,7 @@ def load_prep_img(data_root, target_size,
 
     numpy_data['labels'] = np.array(labels)
     return numpy_data    
-        
-        
+                
 def load_prep_dfire(split_root_path, target_size, fire_class_ids,
     color_spaces=['bgr', 'hsv', 'ycbcr'], normalize=1):
     processed_data = {cs: [] for cs in color_spaces + ['gray']}
@@ -158,7 +158,6 @@ def load_prep_dfire(split_root_path, target_size, fire_class_ids,
     numpy_data['labels'] = np.array(labels) 
     return numpy_data     
   
-  
 def extract_color_histograms(img_processed, color_space, bins):
     histograms = []
     if color_space == 'hsv':
@@ -185,7 +184,6 @@ def extract_color_histograms(img_processed, color_space, bins):
     if histograms: return np.concatenate(histograms)
     else: return np.array([]) 
 
-
 def extract_lbp_features(img_gray, radius, n_points, method):
     if n_points is None:
         n_points = 8 * radius
@@ -200,7 +198,6 @@ def extract_lbp_features(img_gray, radius, n_points, method):
         lbp_hist /= lbp_hist.sum()
     return lbp_hist.flatten()
 
-
 def extract_hog_features(img_gray, orientations, pixels_per_cell, cells_per_block, block_norm):
     hog_features = hog(img_gray, orientations=orientations,
                        pixels_per_cell=pixels_per_cell,
@@ -208,7 +205,6 @@ def extract_hog_features(img_gray, orientations, pixels_per_cell, cells_per_bloc
                        block_norm=block_norm,
                        visualize=False, feature_vector=True)
     return hog_features.flatten() 
-
 
 def combine_features(img_dict, feature_params):
     all_features = []
@@ -303,9 +299,9 @@ def load_and_preprocess_data(config):
                 target_img_size,
                 color_spaces=color_spaces_to_load,
                 normalize=normalize_pixels
-             )
+            )
          else:
-              print(f"Kaggle dataset root not found at {data_root}")
+            print(f"Kaggle dataset root not found at {data_root}")
 
     elif dataset_choice == 'dfire':
          fire_class_ids = config['fire_class_ids']
@@ -326,7 +322,6 @@ def load_and_preprocess_data(config):
         raise ValueError()
 
     return processed_data_dict
-
 
 def extract_features(processed_data_dict, feature_params):
     features = []
@@ -396,6 +391,16 @@ def scale_features(X_train, X_test):
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     return X_train_scaled, X_test_scaled, scaler
+
+def apply_pca(X_train, X_test, n_components=None):
+    if X_train is None or X_test is None or X_train.shape[0] == 0:
+         return None, None, None
+
+    pca = PCA(n_components=n_components, random_state=42)
+    pca.fit(X_train)
+    X_train_pca = pca.transform(X_train)
+    X_test_pca = pca.transform(X_test)
+    return X_train_pca, X_test_pca, pca
 
 def train_svm(X_train_scaled, y_train, C=1.0, gamma='scale', kernel='rbf'):
     if X_train_scaled is None or y_train is None or X_train_scaled.shape[0] == 0:
