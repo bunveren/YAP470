@@ -156,6 +156,102 @@ def load_prep_dfire(split_root_path, target_size, fire_class_ids,
                   
     numpy_data['labels'] = np.array(labels) 
     return numpy_data     
+
+def is_dfire_image_fire(annotation_path, fire_class_ids):
+    if not os.path.exists(annotation_path):
+        return False
+    try:
+        with open(annotation_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if parts and len(parts) > 0:
+                    if parts[0].isdigit():
+                        class_id = int(parts[0])
+                        if class_id in fire_class_ids:
+                            return True 
+    except Exception as e: pass 
+    return False
+
+def load_and_extract_features_memory_safe(config, feature_params):
+    dataset_choice = config.get('dataset_choice', 'dfire') 
+    data_root = config.get('data_root')
+    target_size = config.get('target_img_size')
+    color_spaces_to_load = config.get('color_spaces_to_load', ['bgr', 'hsv', 'ycbcr'])
+    normalize_pixels = config.get('normalize_pixels', 1)
+    fire_class_ids = config.get('fire_class_ids', []) 
+
+    if not data_root or not target_size:
+        return np.array([]), np.array([])
+
+    image_label_pairs = []
+    img_extensions = ['.jpg', '.jpeg', '.png']
+    annotation_extension = '.txt'
+
+    images_dir = os.path.join(data_root, 'images')
+    labels_dir = os.path.join(data_root, 'labels')
+    if not os.path.isdir(images_dir) or not os.path.isdir(labels_dir):
+        return np.array([]), np.array([])
+
+    all_image_files = [f for f in os.listdir(images_dir) if os.path.splitext(f)[1].lower() in img_extensions]
+    for filename in tqdm(all_image_files, desc="Determining Labels"):
+        image_path = os.path.join(images_dir, filename)
+        image_name_without_ext = os.path.splitext(filename)[0]
+        annotation_path = os.path.join(labels_dir, image_name_without_ext + annotation_extension)
+        label = 1 if is_dfire_image_fire(annotation_path, fire_class_ids) else 0
+        image_label_pairs.append((image_path, label))
+  
+    if not image_label_pairs:
+        return np.array([]), np.array([])
+
+    all_features_list = []
+    all_labels_list = []
+    total_images_processed = 0
+    total_images_skipped_reading = 0
+    total_images_skipped_feature = 0
+
+    for image_path, label in tqdm(image_label_pairs, desc="dfire memsafe feat exc."):
+        img_bgr = cv2.imread(image_path)
+
+        if img_bgr is None:
+            total_images_skipped_reading += 1
+            continue
+        img_resized = cv2.resize(img_bgr, target_size, interpolation=cv2.INTER_LINEAR)
+        if normalize_pixels:
+             img_resized = img_resized.astype(np.float32) / 255.0
+        else:
+             img_resized = img_resized.astype(np.uint8)
+
+        img_gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
+        img_dict_single = {'gray': img_gray}
+        if 'bgr' in color_spaces_to_load:
+             img_dict_single['bgr'] = img_resized
+        if 'hsv' in color_spaces_to_load:
+             if normalize_pixels:
+                  img_hsv = cv2.cvtColor(img_resized, cv2.COLOR_BGR2HSV)
+             else:
+                  img_hsv = cv2.cvtColor(img_resized, cv2.COLOR_BGR2HSV)
+             img_dict_single['hsv'] = img_hsv
+        if 'ycbcr' in color_spaces_to_load:
+             if normalize_pixels:
+                 img_ycbcr = cv2.cvtColor(img_resized, cv2.COLOR_BGR2YCrCb)
+             else:
+                 img_ycbcr = cv2.cvtColor(img_resized, cv2.COLOR_BGR2YCrCb)
+             img_dict_single['ycbcr'] = img_ycbcr
+        features_single = combine_features(img_dict_single, feature_params)
+
+        if features_single.size > 0:
+            all_features_list.append(features_single)
+            all_labels_list.append(label)
+            total_images_processed += 1
+        else:
+            total_images_skipped_feature += 1
+            
+    if not all_features_list:
+        return np.array([]), np.array([])
+
+    features_array = np.array(all_features_list, dtype=np.float32)
+    labels_array = np.array(all_labels_list, dtype=np.int32) 
+    return features_array, labels_array
   
 def extract_color_histograms(img_processed, color_space, bins):
     histograms = []

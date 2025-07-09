@@ -6,7 +6,7 @@ FULL_DFIRE_ROOT = "D-Fire"
 SUBSET_REPO_ROOT = "data_subsets"
 
 KAGGLE_SUBSET_SIZE_PER_CLASS = 30
-DFIRE_SUBSET_SIZE_PER_CLASS = 30
+DFIRE_SUBSET_SIZE_PER_CLASS = 800
 DFIRE_FIRE_CLASS_IDS = [0, 1] 
 
 def is_dfire_image_fire(annotation_path, fire_class_ids):
