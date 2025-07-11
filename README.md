@@ -3,6 +3,7 @@ Bu proje, görüntü işleme ve makine öğrenmesi/derin öğrenme teknikleri ku
 
 ## Proje Yapısı
 Proje dizini aşağıdaki gibi organize edilmiştir:
+```
 ├── data_subsets/ # Veri setlerinin alt kümeleri veya işlenmiş halleri için
 ├── fire_dataset/ # Kullanılan yangın veri setleri (push'lanmadı)
 ├── Fire-Detection-Dataset/ # Dummy veri seti
@@ -25,6 +26,7 @@ Proje dizini aşağıdaki gibi organize edilmiştir:
 ├── README.md 
 ├── subset_data.py # Veri alt kümesi oluşturma
 └── YAP_470_Dönem_Projesi_1._Ara_Rapor.pdf # Projenin 1. Ara Raporu
+```
    
 *   `data_subsets/`: Büyük veri setlerinin daha küçük test veya geliştirme alt kümelerini içerebilir.
 *   `lit_surv_review/`: Projeyle ilgili literatür araştırması belgeleri.
