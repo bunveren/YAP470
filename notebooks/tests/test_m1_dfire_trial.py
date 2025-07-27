@@ -6,36 +6,90 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 import warnings
+import inspect # For robust path detection
+
 warnings.filterwarnings('ignore') # Suppress warnings for cleaner output
 
 import tensorflow as tf
 from keras.models import Sequential
-from keras.layers import Dense, BatchNormalization, Dropout, LeakyReLU, Input, ReLU # Ensure ReLU is imported if used
+from keras.layers import Dense, BatchNormalization, Dropout, LeakyReLU, Input, ReLU
 from scikeras.wrappers import KerasClassifier # For wrapping Keras models in scikit-learn API
 
 from skimage.feature import local_binary_pattern, hog
-from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold, RandomizedSearchCV
+# Note: For testing saved models, train_test_split and other sklearn utilities
+# are used within the helper functions for data preparation/evaluation reproduction.
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
-import lightgbm as lgb
-from sklearn.base import ClassifierMixin
-from sklearn.feature_selection import SelectKBest, f_classif, RFE
-from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC # Included for type checking in evaluation, though not directly used for loading
+import lightgbm as lgb # Included for type checking in evaluation
+from sklearn.feature_selection import SelectKBest, RFE # Included for transformer loading
+from sklearn.linear_model import LogisticRegression # Included for RFE
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
-from sklearn.decomposition import PCA
-import matplotlib.pyplot as plt 
+from sklearn.decomposition import PCA # Included for transformer loading
+
+import matplotlib.pyplot as plt # For plotting single images
+
+
+print("Imports and helper functions loaded.")
+
+# --- Robust Path Definitions ---
+# Try to get the actual path of the current notebook/script
+try:
+    # This is more reliable in many Jupyter/IPython environments
+    if '__file__' in locals(): # Check if __file__ is defined (for regular scripts)
+        _current_file_path = os.path.abspath(__file__)
+    else:
+        # For Jupyter notebooks, inspect can often get the path of the current file
+        _current_file_path = os.path.abspath(inspect.getfile(inspect.currentframe()))
+except Exception:
+    # Fallback for environments where the above don't work (e.g., bare IPython shell)
+    print("Warning: Could not reliably determine script path. Falling back to os.getcwd(). Ensure this script is run from a predictable location relative to YAP470.")
+    _current_file_path = os.path.abspath(os.getcwd())
+
+# Assuming your script is in YAP470/notebooks/tests/
+NOTEBOOK_DIR = os.path.dirname(_current_file_path)
+PROJECT_ROOT = os.path.abspath(os.path.join(NOTEBOOK_DIR, '..', '..')) # Go up two levels
+
+MODEL_SAVE_DIR_EVAL = os.path.join(PROJECT_ROOT, 'models')
+DFIRE_ROOT_EVAL = os.path.join(PROJECT_ROOT, 'data_subsets', 'D-Fire')
+
+DFIRE_TRAIN_ROOT_EVAL = os.path.join(DFIRE_ROOT_EVAL, 'train')
+DFIRE_TEST_ROOT_EVAL = os.path.join(DFIRE_ROOT_EVAL, 'test')
+DFIRE_TEST_IMAGES_DIR_EVAL = os.path.join(DFIRE_TEST_ROOT_EVAL, 'images')
+DFIRE_TEST_LABELS_DIR_EVAL = os.path.join(DFIRE_TEST_ROOT_EVAL, 'labels')
+
+# --- DFIRE_CONFIG_EVAL (aligned with original training setup) ---
+DFIRE_CONFIG_EVAL = {
+    'fire_class_ids': [0, 1],
+    'target_img_size': (128, 128),
+    'test_size': 0.2, # Used for reproducing original train/test split
+    'random_state': 42,
+    'img_extensions': ('.png', '.jpg', '.jpeg', '.bmp', '.gif'),
+    'annotation_extension': '.txt',
+    'model_dir': MODEL_SAVE_DIR_EVAL, # This points to the main models folder
+    'color_spaces_to_load': ['bgr', 'hsv', 'ycbcr'], # Important for feature extraction consistency
+    'normalize_pixels': 1 # Important for feature extraction consistency
+}
+
+# --- Helper Functions (Updated for image reading and general use) ---
 
 def is_dfire_image_fire(annotation_path, fire_class_ids):
+    """
+    Checks if an annotation file indicates the presence of fire.
+    Handles potential encoding issues by specifying utf-8 and errors='ignore'.
+    """
     if not os.path.exists(annotation_path): return False
     try:
-        with open(annotation_path, 'r') as f:
+        with open(annotation_path, 'r', encoding='utf-8', errors='ignore') as f:
             for line in f:
                 parts = line.strip().split()
                 if parts and len(parts) > 0:
                     if parts[0].isdigit():
                         class_id = int(parts[0])
                         if class_id in fire_class_ids: return True
-    except Exception as e: pass
+    except Exception as e:
+        # print(f"Warning: Error reading annotation {annotation_path}: {e}") # Uncomment for debug
+        pass
     return False
 
 def extract_color_histograms(img_processed, color_space, bins):
@@ -62,7 +116,6 @@ def extract_color_histograms(img_processed, color_space, bins):
     else: return np.array([])
 
 def extract_lbp_features(img_gray, radius, n_points, method):
-
     if img_gray is None or img_gray.size == 0: return np.array([])
     if n_points is None: n_points = 8 * radius
 
@@ -86,6 +139,7 @@ def extract_lbp_features(img_gray, radius, n_points, method):
         return lbp_hist.flatten()
 
     except Exception as e:
+        # print(f"Warning: LBP feature extraction failed: {e}") # Uncomment for debug
         return np.array([])
 
 def extract_hog_features(img_gray, orientations, pixels_per_cell, cells_per_block, block_norm):
@@ -99,6 +153,7 @@ def extract_hog_features(img_gray, orientations, pixels_per_cell, cells_per_bloc
     min_img_w = cell_w * block_w
 
     if img_h < min_img_h or img_w < min_img_w:
+        # print(f"Warning: Image size {img_h}x{img_w} too small for HOG (min {min_img_h}x{min_img_w}).") # Uncomment for debug
         return np.array([])
     try:
         hog_features = hog(img_gray, orientations=orientations,
@@ -108,6 +163,7 @@ def extract_hog_features(img_gray, orientations, pixels_per_cell, cells_per_bloc
                            visualize=False, feature_vector=True)
         return hog_features.flatten()
     except Exception as e:
+        # print(f"Warning: HOG feature extraction failed: {e}") # Uncomment for debug
         return np.array([])
 
 def combine_features(img_dict, feature_params):
@@ -142,6 +198,9 @@ def combine_features(img_dict, feature_params):
         return np.array([])
 
 def load_and_extract_features_memory_safe(config, feature_params):
+    """
+    Loads images and extracts features in a memory-safe way, handling Unicode paths with cv2.imdecode.
+    """
     dataset_choice = config.get('dataset_choice', 'dfire')
     data_root = config.get('data_root')
     target_size = config.get('target_img_size')
@@ -152,7 +211,7 @@ def load_and_extract_features_memory_safe(config, feature_params):
     if not data_root or not target_size: return np.array([]), np.array([])
 
     image_label_pairs = []
-    img_extensions = ('.jpg', '.jpeg', '.png', '.bmp') 
+    img_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif')
     annotation_extension = '.txt'
     images_dir = os.path.join(data_root, 'images')
     labels_dir = os.path.join(data_root, 'labels')
@@ -187,18 +246,27 @@ def load_and_extract_features_memory_safe(config, feature_params):
 
     print("Loading images and extracting features...")
     for image_path, label in tqdm(image_label_pairs, desc="Memory-safe Feature Extraction", leave=False):
-        img_bgr = cv2.imread(image_path)
+        # Use np.fromfile with cv2.imdecode to handle Unicode paths
+        img_bgr = None
+        try:
+            img_bgr = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception as e:
+            # print(f"Error reading image {image_path}: {e}") # Uncomment for debug
+            total_images_skipped_reading += 1
+            continue
 
         if img_bgr is None:
+            # print(f"Warning: cv2.imdecode returned None for {image_path}. Image might be corrupted.") # Uncomment for debug
             total_images_skipped_reading += 1
             continue
 
         try:
             img_resized = cv2.resize(img_bgr, target_size, interpolation=cv2.INTER_LINEAR)
             img_dict_single = {}
+            # img_processed_bgr is generally for display/debugging; not strictly needed for feature extraction paths
+            # but keeping for consistency with original script logic
             img_processed_bgr = None
             if normalize_pixels:
-                img_processed_bgr = img_resized.astype(np.float32) / 255.0
                 img_resized_uint8 = img_resized.astype(np.uint8)
                 img_gray = cv2.cvtColor(img_resized_uint8, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
                 if 'hsv' in color_spaces_to_load:
@@ -227,6 +295,7 @@ def load_and_extract_features_memory_safe(config, feature_params):
                 total_images_skipped_feature += 1
 
         except Exception as e:
+            # print(f"Error processing features for {image_path}: {e}") # Uncomment for debug
             total_images_skipped_feature += 1
 
 
@@ -248,38 +317,8 @@ def load_and_extract_features_memory_safe(config, feature_params):
 
     return features_array, labels_array
 
-def get_config(dataset_choice):
-    config = {}
-    if dataset_choice == 'kaggle':
-        config['dataset_choice'] = 'kaggle'
-        config['data_root'] = os.path.join('..', 'fire_dataset')
-        config['target_img_size'] = (128, 128)
-        config['color_spaces_to_load'] = ['bgr', 'hsv', 'ycbcr']
-        config['normalize_pixels'] = 1
-        config['fire_class_ids'] = None
-    elif dataset_choice == 'dfire':
-        config['dataset_choice'] = 'dfire'
-        config['dfire_root'] = os.path.join('..', 'data_subsets', 'D-Fire')
-        config['split_name'] = "train"
-        config['data_root'] = os.path.join(config['dfire_root'], config['split_name'])
-        config['target_img_size'] = (128, 128)
-        config['color_spaces_to_load'] = ['bgr', 'hsv', 'ycbcr']
-        config['normalize_pixels'] = 1
-        config['fire_class_ids'] = [0, 1]
-    else:
-        raise ValueError(f"Unknown dataset choice: {dataset_choice}. Choose 'kaggle' or 'dfire'.")
-
-    print(f"Using dataset: {config['dataset_choice']}")
-    print(f"Data root: {config.get('data_root')}")
-    print(f"Target image size: {config['target_img_size']}")
-    print(f"Color spaces loaded: {config['color_spaces_to_load']}")
-    print(f"Normalize pixels: {bool(config['normalize_pixels'])}")
-    if dataset_choice == 'dfire':
-         print(f"D-Fire Split: {config['split_name']}")
-         print(f"D-Fire Fire Class IDs: {config['fire_class_ids']}")
-    return config
-
 def get_feature_params():
+    """Returns the feature extraction parameters."""
     feature_params = {
         'hist_bins': 100,
         'lbp_radius': 3,
@@ -290,257 +329,43 @@ def get_feature_params():
         'hog_cells_per_block': (2, 2),
         'hog_block_norm': 'L2-Hys'
     }
-    print("\nFeature extraction parameters:", feature_params)
+    # print("\nFeature extraction parameters:", feature_params) # Uncomment to see params on every call
     return feature_params
 
-def split_data(features_array, labels_array, test_size=0.2, random_state=42):
-    if features_array.shape[0] == 0:
-        print("Feature array is empty, cannot split.")
-        return None, None, None, None
+# Placeholder functions for compatibility, not directly used in *this* test script
+# but needed if any other function calls them.
+def get_config(dataset_choice):
+    """Dummy get_config, not used directly in this evaluation script as config is DFIRE_CONFIG_EVAL."""
+    raise NotImplementedError("get_config is not implemented in this evaluation script. Use DFIRE_CONFIG_EVAL directly.")
 
-    print(f"\nSplitting data: training ({1-test_size:.0%}) testing ({test_size:.0%})")
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        features_array,
-        labels_array,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=labels_array
-    )
-
-    print(f"Training features shape: {X_train.shape}")
-    print(f"Testing features shape: {X_test.shape}")
-    print(f"Training labels shape: {y_train.shape}")
-    print(f"Testing labels shape: {y_test.shape}")
-
-    train_labels, train_counts = np.unique(y_train, return_counts=True)
-    test_labels, test_counts = np.unique(y_test, return_counts=True)
-    print(f"Train label distribution: {dict(zip(train_labels, train_counts))}")
-    print(f"Test label distribution: {dict(zip(test_labels, test_counts))}")
-
-    return X_train, X_test, y_train, y_test
+def split_data(*args, **kwargs):
+    """Dummy split_data, data is split manually for evaluation reproduction."""
+    raise NotImplementedError("split_data is not implemented in this evaluation script. Split manually for evaluation reproduction.")
 
 def scale_features(X_train, X_test):
-    if X_train is None or X_test is None or X_train.shape[0] == 0:
-         print("Scaling skipped: train or test data is empty.")
-         return None, None, None
-    print("\nScaling features...")
-    scaler = StandardScaler()
+    """Dummy scale_features, global scaler is loaded directly."""
+    raise NotImplementedError("scale_features is not implemented in this evaluation script. Global scaler is loaded directly.")
 
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    print("Scaling complete.")
-    return X_train_scaled, X_test_scaled, scaler
+def perform_correlation_selection(*args, **kwargs):
+    """Dummy perform_correlation_selection, selectors are loaded directly."""
+    raise NotImplementedError("perform_correlation_selection is not implemented in this evaluation script. Selectors are loaded directly.")
 
-def perform_correlation_selection(X_train, y_train, X_test, k_features):
-    if X_train is None or X_test is None or X_train.shape[0] == 0:
-         print("Correlation Selection skipped: train or test data is empty.")
-         return None, None, None
+def perform_rfe_selection(*args, **kwargs):
+    """Dummy perform_rfe_selection, selectors are loaded directly."""
+    raise NotImplementedError("perform_rfe_selection is not implemented in this evaluation script. Selectors are loaded directly.")
 
-    n_total_features = X_train.shape[1]
-    k_features_int = k_features
+def tune_model_hyperparameters(*args, **kwargs):
+    """Dummy tune_model_hyperparameters, models are loaded directly."""
+    raise NotImplementedError("tune_model_hyperparameters is not implemented in this evaluation script. Models are loaded directly.")
 
-    percentage_str = None
-    if isinstance(k_features, str) and k_features.endswith('%'):
-        try:
-            percentage = float(k_features[:-1]) / 100.0
-            k_features_int = max(1, int(n_total_features * percentage))
-            percentage_str = k_features 
-            print(f"Selecting top {k_features_int} features based on {percentage_str} percentage using Correlation...")
-        except ValueError:
-            print(f"Invalid percentage string for k_features: {k_features}. Skipping selection.")
-            return X_train, X_test, None
-    elif k_features == 'all':
-         print("Selecting all features (no correlation selection)...\n")
-         return X_train, X_test, None
-    elif isinstance(k_features, int) and k_features > 0:
-        k_features_int = min(k_features, n_total_features)
-        print(f"Selecting top {k_features_int} features by correlation...")
-    else:
-        print(f"Invalid k_features value: {k_features}. Must be int > 0, 'all', or percentage string (e.g., '75%'). Skipping selection.")
-        return X_train, X_test, None
-
-    if k_features_int <= 0 or k_features_int > n_total_features:
-         print(f"Calculated number of features to select ({k_features_int}) is invalid. Skipping selection.")
-         return X_train, X_test, None
-    if k_features_int == n_total_features:
-         print("Number of features to select is equal to total features. Skipping selection.\n")
-         return X_train, X_test, None
-
-    selector = SelectKBest(score_func=f_classif, k=k_features_int)
-    selector.fit(X_train, y_train)
-
-    X_train_selected = selector.transform(X_train)
-    X_test_selected = selector.transform(X_test)
-
-    print(f"Original feature shape: {X_train.shape}")
-    print(f"Selected feature shape: {X_train_selected.shape}")
-
-    return X_train_selected, X_test_selected, selector
-
-def perform_rfe_selection(X_train, y_train, X_test, n_features_to_select, step=0.1, estimator=None):
-    if X_train is None or X_test is None or X_train.shape[0] == 0:
-         print("RFE Selection skipped: train or test data is empty.")
-         return None, None, None
-
-    n_total_features = X_train.shape[1]
-    n_features_int = n_features_to_select
-
-    if estimator is None:
-        estimator = LogisticRegression(solver='liblinear', random_state=42, max_iter=2000)
-
-    percentage_str = None # Initialize to None
-    if isinstance(n_features_to_select, str) and n_features_to_select.endswith('%'):
-        try:
-            percentage = float(n_features_to_select[:-1]) / 100.0
-            n_features_int = max(1, int(n_total_features * percentage))
-            percentage_str = n_features_to_select # Keep original string for printing
-            print(f"Selecting top {n_features_int} features based on {percentage_str} percentage using RFE...")
-        except ValueError:
-            print(f"Invalid percentage string for n_features_to_select: {n_features_to_select}. Skipping RFE.")
-            return X_train, X_test, None
-    elif isinstance(n_features_to_select, int) and n_features_to_select > 0:
-        n_features_int = min(n_features_to_select, n_total_features)
-        print(f"Selecting {n_features_int} features using RFE...")
-    elif n_features_to_select == 'auto':
-        print("RFE with 'auto' feature selection requires RFECV, which is not implemented in this helper. Skipping selection.")
-        return X_train, X_test, None
-    else:
-        print(f"Invalid n_features_to_select value: {n_features_to_select}. Skipping RFE.")
-        return X_train, X_test, None
-
-    if n_features_int <= 0 or n_features_int > n_total_features:
-        print(f"Calculated number of features for RFE ({n_features_int}) is invalid. Skipping selection.")
-        return X_train, X_test, None
-    if n_features_int == n_total_features:
-        print("Number of features to select is equal to total features. Skipping selection.\n")
-        return X_train, X_test, None
-
-    try:
-        rfe = RFE(estimator=estimator, n_features_to_select=n_features_int, step=step)
-        rfe.fit(X_train, y_train)
-
-        X_train_selected = rfe.transform(X_train)
-        X_test_selected = rfe.transform(X_test)
-
-        print(f"Original feature shape: {X_train.shape}")
-        print(f"Selected feature shape: {X_train_selected.shape}")
-
-        return X_train_selected, X_test_selected, rfe
-    except Exception as e:
-        print(f"Error during RFE fit/transform: {e}")
-        return X_train, X_test, None
-
-def tune_model_hyperparameters(model_estimator, X_train, y_train, param_grid, cv_strategy, scoring='f1', search_method='GridSearch'):
-    if X_train is None or y_train is None or X_train.shape[0] == 0:
-        print("Hyperparameter tuning skipped: training data is empty.")
-        return None
-
-    print(f"\nPerforming {search_method} tuning (scoring='{scoring}')...")
-    start_time = time.time()
-
-    if search_method == 'GridSearch':
-        search_cv = GridSearchCV(
-            estimator=model_estimator,
-            param_grid=param_grid,
-            cv=cv_strategy,
-            scoring=scoring,
-            n_jobs=4,
-            verbose=1
-        )
-    elif search_method == 'RandomSearch':
-         n_iter_search = 20
-         search_cv = RandomizedSearchCV(
-            estimator=model_estimator,
-            param_distributions=param_grid,
-            n_iter=n_iter_search,
-            cv=cv_strategy,
-            scoring=scoring,
-            n_jobs=4,
-            verbose=1,
-            random_state=42
-         )
-    else:
-        print(f"Unknown search_method: {search_method}. Use 'GridSearch' or 'RandomSearch'.")
-        return None
-
-    search_cv.fit(X_train, y_train)
-
-    end_time = time.time()
-    print(f"{search_method} duration: {end_time - start_time:.2f} seconds")
-    print("\nBest parameters found:")
-    print(search_cv.best_params_)
-    print("\nBest CV score:")
-    print(search_cv.best_score_)
-
-    return search_cv
-
-def evaluate_model(model, X_test, y_test, model_name="Model", feature_set_name="Unknown Feature Set"):
-    if model is None or X_test is None or y_test is None or X_test.shape[0] == 0:
-        print(f"{model_name} evaluation skipped on {feature_set_name}: model not trained or test data is empty.")
-        return {}
-
-    print(f"\nEvaluating {model_name} on the test set using {feature_set_name}...")
-    start_time = time.time()
-    if isinstance(model, tf.keras.Model):
-        y_pred_proba = model.predict(X_test, verbose=0)
-        y_pred = (y_pred_proba > 0.5).astype(int)
-    else:
-        y_pred = model.predict(X_test)
-    end_time = time.time()
-    print(f"Prediction duration: {end_time - start_time:.4f} seconds")
-
-    accuracy = accuracy_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred, zero_division=0)
-    recall = recall_score(y_test, y_pred, zero_division=0)
-    f1 = f1_score(y_test, y_pred, zero_division=0)
-    conf_matrix = confusion_matrix(y_test, y_pred)
-
-    print(f"Accuracy: {accuracy:.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall (Sensitivity): {recall:.4f}")
-    print(f"F1 Score: {f1:.4f}")
-    print(f"Confusion Matrix ({model_name} on {feature_set_name}):")
-    print(conf_matrix)
-
-    return {
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1_score': f1,
-        'confusion_matrix': conf_matrix.tolist()
-    }
-
-def perform_pca_dimension_reduction(X_train, X_test, n_components):
-    if X_train is None or X_test is None or X_train.shape[0] == 0:
-        print("PCA skipped bc the data is empty..")
-        return None, None, None
-
-    try:
-        n_total_features = X_train.shape[1]
-        if isinstance(n_components, float) and 0 < n_components < 1:
-            print(f"Applying PCA to retain {n_components:.0%} of variance...")
-        elif isinstance(n_components, int) and 0 < n_components < n_total_features:
-            print(f"Applying PCA to reduce to {n_components} components...")
-        else:
-            print(f"Invalid n_components value: {n_components}. Skipping PCA.")
-            return X_train, X_test, None
-        pca = PCA(n_components=n_components, random_state=42)
-        X_train_pca = pca.fit_transform(X_train)
-        X_test_pca = pca.transform(X_test)
-
-        print(f"Original feature shape: {X_train.shape}")
-        print(f"PCA transformed feature shape: {X_train_pca.shape}")
-        print(f"Explained variance ratio with {pca.n_components_} components: {np.sum(pca.explained_variance_ratio_):.4f}")
-
-        return X_train_pca, X_test_pca, pca
-    except Exception as e:
-        print(f"Error during PCA: {e}")
-        return X_train, X_test, None
+def perform_pca_dimension_reduction(*args, **kwargs):
+    """Dummy perform_pca_dimension_reduction, PCA transformers are loaded directly."""
+    raise NotImplementedError("perform_pca_dimension_reduction is not implemented in this evaluation script. PCA transformers are loaded directly.")
 
 def create_custom_mlp(hidden_layer_1_neurons=128, hidden_layer_2_neurons=64,
                         dropout_rate=0.3, activation='leaky_relu', learning_rate=0.001,
                         meta=None):
+    """Keras MLP model definition."""
     n_features_in = meta["n_features_in_"]
 
     model = Sequential()
@@ -562,9 +387,58 @@ def create_custom_mlp(hidden_layer_1_neurons=128, hidden_layer_2_neurons=64,
     model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return model
 
+def evaluate_model(model, X_test, y_test, model_name="Model", feature_set_name="Unknown Feature Set"):
+    """Evaluates a given model and prints metrics."""
+    if model is None or X_test is None or y_test is None or X_test.shape[0] == 0:
+        print(f"{model_name} evaluation skipped on {feature_set_name}: model not trained or test data is empty.")
+        return {}
+
+    # print(f"\nEvaluating {model_name} on the test set using {feature_set_name}...") # Uncomment for verbose
+    start_time = time.time()
+    if isinstance(model, KerasClassifier): # Scikeras wrapper around Keras model
+        y_pred = model.predict(X_test)
+    elif isinstance(model, tf.keras.Model): # Raw Keras model (if directly loaded without wrapper)
+        y_pred_proba = model.predict(X_test, verbose=0)
+        y_pred = (y_pred_proba > 0.5).astype(int)
+    else: # For scikit-learn models
+        y_pred = model.predict(X_test)
+    end_time = time.time()
+    # print(f"Prediction duration: {end_time - start_time:.4f} seconds") # Uncomment for verbose
+
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
+    conf_matrix = confusion_matrix(y_test, y_pred)
+
+    print(f"    Accuracy: {accuracy:.4f}")
+    print(f"    Precision: {precision:.4f}")
+    print(f"    Recall (Sensitivity): {recall:.4f}")
+    print(f"    F1 Score: {f1:.4f}")
+    print(f"    Confusion Matrix:\n{conf_matrix}")
+
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'confusion_matrix': conf_matrix.tolist()
+    }
+
 def extract_features_single_image(image_path_single, feature_params_single, config_single):
-    img_bgr = cv2.imread(image_path_single)
-    if img_bgr is None: return np.array([])
+    """
+    Extracts features from a single image using the defined feature parameters and config.
+    Uses np.fromfile and cv2.imdecode for robust image reading.
+    """
+    img_bgr = None
+    try:
+        img_bgr = cv2.imdecode(np.fromfile(image_path_single, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except Exception as e:
+        print(f"Error reading image for feature extraction: {image_path_single}: {e}")
+        return np.array([])
+
+    if img_bgr is None:
+        return np.array([])
 
     img_resized = cv2.resize(img_bgr, config_single['target_img_size'], interpolation=cv2.INTER_LINEAR)
     img_dict_single = {}
@@ -582,28 +456,8 @@ def extract_features_single_image(image_path_single, feature_params_single, conf
     img_dict_single['gray'] = img_gray
     return combine_features(img_dict_single, feature_params_single)
 
-
-DFIRE_CONFIG_EVAL = {
-    'fire_class_ids': [0, 1],
-    'target_img_size': (128, 128),
-    'test_size': 0.2,
-    'random_state': 42,
-    'img_extensions': ('.png', '.jpg', '.jpeg', '.bmp', '.gif'),
-    'annotation_extension': '.txt',
-    'model_dir': os.path.join('..', '..', 'models'), 
-    'color_spaces_to_load': ['bgr', 'hsv', 'ycbcr'], 
-    'normalize_pixels': 1 
-}
-NOTEBOOK_DIR = os.getcwd()
-PROJECT_ROOT = '..\..'
-MODEL_SAVE_DIR_EVAL = os.path.join(PROJECT_ROOT, 'models')
-DFIRE_ROOT_EVAL = os.path.join(PROJECT_ROOT, 'data_subsets', 'D-Fire')
-DFIRE_TRAIN_ROOT_EVAL = os.path.join(DFIRE_ROOT_EVAL, 'train')
-DFIRE_TEST_ROOT_EVAL = os.path.join(DFIRE_ROOT_EVAL, 'test')
-DFIRE_TEST_IMAGES_DIR_EVAL = os.path.join(DFIRE_TEST_ROOT_EVAL, 'images')
-DFIRE_TEST_LABELS_DIR_EVAL = os.path.join(DFIRE_TEST_ROOT_EVAL, 'labels')
-
 def load_artifacts_for_feature_models_eval(model_config_list, model_dir):
+    """Loads all specified models and their associated transformers for evaluation."""
     artifacts = {}
     print("\n--- Loading Models and Transformers for Evaluation ---")
     for item in tqdm(model_config_list, desc="Loading evaluation artifacts"):
@@ -616,15 +470,19 @@ def load_artifacts_for_feature_models_eval(model_config_list, model_dir):
         specific_transformer = None
 
         try:
-            if '.keras' in model_filename:
-                loaded_model_wrapper = tf.keras.models.load_model(
+            if '.keras' in model_filename.lower(): # Check for .keras extension (case-insensitive)
+                # When loading a KerasClassifier (Scikeras wrapper), load_model might return the wrapper
+                # or just the raw Keras model. We need to handle both cases if you used KerasClassifier
+                # during training. The custom_objects ensure create_custom_mlp is known.
+                loaded_model_temp = tf.keras.models.load_model(
                     model_path,
                     custom_objects={'create_custom_mlp': create_custom_mlp,
                                     'KerasClassifier': KerasClassifier,
                                     'LeakyReLU': tf.keras.layers.LeakyReLU,
                                     'ReLU': tf.keras.layers.ReLU}
                 )
-                loaded_model = loaded_model_wrapper.model_ if hasattr(loaded_model_wrapper, 'model_') else loaded_model_wrapper
+                # If it's a KerasClassifier instance, its actual Keras model is in .model_
+                loaded_model = loaded_model_temp.model_ if isinstance(loaded_model_temp, KerasClassifier) else loaded_model_temp
             else:
                 loaded_model = joblib.load(model_path)
 
@@ -644,8 +502,14 @@ def load_artifacts_for_feature_models_eval(model_config_list, model_dir):
     return artifacts
 
 def reproduce_original_test_split_features_eval(dfire_train_root, config, feature_params, global_scaler, artifacts_dict):
+    """
+    Reproduces a train-test split from the D-Fire 'train' data
+    and evaluates each loaded model on its 'test' portion.
+    """
     print("\n--- Reproducing Original Test Set Results from D-Fire/train data (Feature Models) ---")
+
     print("  Loading and extracting features from D-Fire 'train' split...")
+    # Use load_and_extract_features_memory_safe which has the unicode fix
     all_train_features_raw, all_train_labels = load_and_extract_features_memory_safe(
         {'dataset_choice': 'dfire', 'data_root': dfire_train_root,
          'target_img_size': config['target_img_size'],
@@ -678,44 +542,30 @@ def reproduce_original_test_split_features_eval(dfire_train_root, config, featur
         if transformer is not None:
             try:
                 X_test_for_model = transformer.transform(X_test_reproduced)
-                print(f"    Applied model-specific transformer to recreated test data.")
+                # print(f"    Applied model-specific transformer to recreated test data.") # Uncomment for verbose
             except Exception as e:
                 print(f"    Error applying transformer for {model_name}: {e}. Using globally scaled data.")
 
         if model is not None:
-            try:
-                if isinstance(model, tf.keras.Model):
-                    y_pred_proba = model.predict(X_test_for_model, verbose=0)
-                    y_pred = (y_pred_proba > 0.5).astype(int)
-                else:
-                    y_pred = model.predict(X_test_for_model)
-
-                accuracy = accuracy_score(y_test_reproduced, y_pred)
-                precision = precision_score(y_test_reproduced, y_pred, zero_division=0)
-                recall = recall_score(y_test_reproduced, y_pred, zero_division=0)
-                f1 = f1_score(y_test_reproduced, y_pred, zero_division=0)
-                conf_matrix = confusion_matrix(y_test_reproduced, y_pred)
-
-                print(f"    Accuracy: {accuracy:.4f}")
-                print(f"    Precision: {precision:.4f}")
-                print(f"    Recall (Sensitivity): {recall:.4f}")
-                print(f"    F1 Score: {f1:.4f}")
-                print(f"    Confusion Matrix:\n{conf_matrix}")
-            except Exception as e:
-                print(f"    Error during prediction or evaluation for {model_name}: {e}")
+            evaluate_model(model, X_test_for_model, y_test_reproduced, model_name, "Recreated Test Split")
         else:
             print(f"  Model {model_name} was not loaded successfully.")
 
 def evaluate_feature_folder_eval(images_folder_path, labels_folder_path, artifacts_dict, config, feature_params, global_scaler):
+    """
+    Loads features from a dedicated test folder, applies transformations,
+    and evaluates each loaded model.
+    """
     print(f"\n--- Evaluating models on dedicated test folder: {os.path.basename(images_folder_path)} (Feature Models) ---")
 
-    test_data_config = {'dataset_choice': 'dfire', 'data_root': images_folder_path.replace('images', ''), # Adjust data_root for load_and_extract_features_memory_safe
+    test_data_config = {'dataset_choice': 'dfire', 'data_root': os.path.dirname(images_folder_path), # Adjust data_root for load_and_extract_features_memory_safe
                         'target_img_size': config['target_img_size'],
                         'color_spaces_to_load': config['color_spaces_to_load'],
                         'normalize_pixels': config['normalize_pixels'],
                         'fire_class_ids': config['fire_class_ids']}
 
     print("  Loading and extracting features from dedicated test folder...")
+    # Use load_and_extract_features_memory_safe which has the unicode fix
     X_test_raw_folder, y_test_folder = load_and_extract_features_memory_safe(test_data_config, feature_params)
 
     if X_test_raw_folder.shape[0] == 0:
@@ -734,49 +584,35 @@ def evaluate_feature_folder_eval(images_folder_path, labels_folder_path, artifac
         if transformer is not None:
             try:
                 X_test_for_model = transformer.transform(X_test_scaled_folder)
-                print(f"    Applied model-specific transformer to dedicated test data.")
+                # print(f"    Applied model-specific transformer to dedicated test data.") # Uncomment for verbose
             except Exception as e:
                 print(f"    Error applying transformer for {model_name}: {e}. Using globally scaled data.")
 
         if model is not None:
-            try:
-                if isinstance(model, tf.keras.Model):
-                    y_pred_proba = model.predict(X_test_for_model, verbose=0)
-                    y_pred = (y_pred_proba > 0.5).astype(int)
-                else:
-                    y_pred = model.predict(X_test_for_model)
-
-                accuracy = accuracy_score(y_test_folder, y_pred)
-                precision = precision_score(y_test_folder, y_pred, zero_division=0)
-                recall = recall_score(y_test_folder, y_pred, zero_division=0)
-                f1 = f1_score(y_test_folder, y_pred, zero_division=0)
-                conf_matrix = confusion_matrix(y_test_folder, y_pred)
-
-                print(f"    Accuracy: {accuracy:.4f}")
-                print(f"    Precision: {precision:.4f}")
-                print(f"    Recall (Sensitivity): {recall:.4f}")
-                print(f"    F1 Score: {f1:.4f}")
-                print(f"    Confusion Matrix:\n{conf_matrix}")
-            except Exception as e:
-                print(f"    Error during prediction or evaluation for {model_name}: {e}")
+            evaluate_model(model, X_test_for_model, y_test_folder, model_name, "Dedicated Test Folder")
         else:
             print(f"  Model {model_name} was not loaded successfully.")
 
 def process_single_image_feature_model_eval(image_path, labels_root_dir, artifacts_dict, config, feature_params, global_scaler):
+    """
+    Processes a single image: extracts features, applies transformations,
+    makes predictions with all loaded models, and displays the image.
+    Uses np.fromfile and cv2.imdecode for robust image reading for display.
+    """
     print(f"\n--- Processing single image: {os.path.basename(image_path)} (Feature Models) ---")
 
+    # Use np.fromfile with cv2.imdecode for robust image reading for display
     img_display = None
     try:
-        with open(image_path, 'rb') as f:
-            bytes_read = bytearray(f.read())
-        img_display = cv2.imdecode(np.asarray(bytes_read, dtype=np.uint8), cv2.IMREAD_COLOR)
+        img_display = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
     except Exception as e:
         print(f"Error: Could not read image for display: {image_path}. Error: {e}")
         return
+
     if img_display is None:
         print(f"Error: cv2.imdecode returned None for {image_path}. Image might be corrupted or not a valid image format.")
         return
-    
+
     img_name_without_ext = os.path.splitext(os.path.basename(image_path))[0]
     annotation_path = os.path.join(labels_root_dir, img_name_without_ext + config['annotation_extension'])
     true_label_num = 1 if is_dfire_image_fire(annotation_path, config['fire_class_ids']) else 0
@@ -784,10 +620,17 @@ def process_single_image_feature_model_eval(image_path, labels_root_dir, artifac
 
     raw_features_single = extract_features_single_image(image_path, feature_params, config)
     if raw_features_single.size == 0:
-        print(f"  Failed to extract features for {os.path.basename(image_path)}. Skipping.")
+        print(f"  Failed to extract features for {os.path.basename(image_path)}. Skipping further predictions.")
+        # Still show the image if it loaded, even if features couldn't be extracted
+        plt.figure(figsize=(8, 8))
+        plt.imshow(cv2.cvtColor(img_display, cv2.COLOR_BGR2RGB))
+        title_text = f"Image: {os.path.basename(image_path)}\nTrue Label: {true_label_text}\n(Feature Extraction Failed)"
+        plt.title(title_text)
+        plt.axis('off')
+        plt.show()
         return
 
-    raw_features_single = raw_features_single.reshape(1, -1) 
+    raw_features_single = raw_features_single.reshape(1, -1)
     scaled_features_single = global_scaler.transform(raw_features_single)
 
     predictions_summary = []
@@ -805,10 +648,13 @@ def process_single_image_feature_model_eval(image_path, labels_root_dir, artifac
 
         if model is not None:
             try:
-                if isinstance(model, tf.keras.Model):
-                    prediction_proba = model.predict(features_for_prediction, verbose=0)
-                    prediction = (prediction_proba > 0.5).astype(int)[0][0]
-                else:
+                if isinstance(model, KerasClassifier):
+                    prediction_proba = model.predict_proba(features_for_prediction)[:, 1] # Get probability for positive class
+                    prediction = (prediction_proba > 0.5).astype(int)[0]
+                elif isinstance(model, tf.keras.Model):
+                    prediction_proba = model.predict(features_for_prediction, verbose=0)[0][0] # Raw Keras model
+                    prediction = (prediction_proba > 0.5).astype(int)
+                else: # For scikit-learn models
                     prediction = model.predict(features_for_prediction)[0]
                 predictions_summary.append(f"{model_name}: {'Fire' if prediction == 1 else 'Non-Fire'}")
             except Exception as e:
@@ -824,12 +670,15 @@ def process_single_image_feature_model_eval(image_path, labels_root_dir, artifac
     plt.show()
 
 
+# --- Main Execution for Feature-Based Models Comprehensive Evaluation ---
 print(f"\n\n=== D-Fire Feature-Based Model Comprehensive Evaluation ===")
+print(f"Project Root: {PROJECT_ROOT}")
 print(f"DFIRE_ROOT set to: {DFIRE_ROOT_EVAL}")
 print(f"DFIRE_TRAIN_ROOT set to: {DFIRE_TRAIN_ROOT_EVAL}")
 print(f"DFIRE_TEST_ROOT set to: {DFIRE_TEST_ROOT_EVAL}")
 print(f"MODEL_DIR set to: {MODEL_SAVE_DIR_EVAL}")
 
+# Define the list of models and their associated transformers to evaluate
 models_to_load_and_evaluate_final = [
     {
         'display_name': 'Kaggle Custom MLP (Scaled RFE 75%)',
@@ -848,8 +697,10 @@ models_to_load_and_evaluate_final = [
     }
 ]
 
+# Load the main global scaler first, as it's needed for all feature processing
 global_scaler_filename = 'dfirem1_global_scaler.pkl'
-global_scaler_path = os.path.join(MODEL_SAVE_DIR_EVAL,global_scaler_filename)
+global_scaler_path = os.path.join(MODEL_SAVE_DIR_EVAL, global_scaler_filename) # Use os.path.join
+
 global_scaler_obj_eval = None
 try:
     global_scaler_obj_eval = joblib.load(global_scaler_path)
@@ -861,15 +712,39 @@ except Exception as e:
 
 
 if global_scaler_obj_eval:
+    feature_params_eval = get_feature_params() # Get feature params for evaluation
     loaded_artifacts_eval = load_artifacts_for_feature_models_eval(models_to_load_and_evaluate_final, MODEL_SAVE_DIR_EVAL)
 
     if loaded_artifacts_eval:
         print("\n--- Loaded feature-based models successfully. Proceeding with evaluations. ---")
-        reproduce_original_test_split_features_eval(DFIRE_TRAIN_ROOT_EVAL, DFIRE_CONFIG_EVAL, get_feature_params(), global_scaler_obj_eval, loaded_artifacts_eval)
-        evaluate_feature_folder_eval(DFIRE_TEST_IMAGES_DIR_EVAL, DFIRE_TEST_LABELS_DIR_EVAL, loaded_artifacts_eval, DFIRE_CONFIG_EVAL, get_feature_params(), global_scaler_obj_eval)
+
+        # 1. Reproduce results on a split from the D-Fire 'train' data
+        # This will reload and extract features from the 'train' split and then split them again
+        # to ensure consistency with how the models were originally validated.
+        reproduce_original_test_split_features_eval(
+            DFIRE_TRAIN_ROOT_EVAL,
+            DFIRE_CONFIG_EVAL,
+            feature_params_eval,
+            global_scaler_obj_eval,
+            loaded_artifacts_eval
+        )
+
+        # 2. Evaluate on the dedicated D-Fire 'test' folder
+        evaluate_feature_folder_eval(
+            DFIRE_TEST_IMAGES_DIR_EVAL,
+            DFIRE_TEST_LABELS_DIR_EVAL,
+            loaded_artifacts_eval,
+            DFIRE_CONFIG_EVAL,
+            feature_params_eval,
+            global_scaler_obj_eval
+        )
+
+        # 3. Prepare and process sample images from the dedicated D-Fire 'test' folder for visualization
         print("\n--- Preparing sample images for single image processing (Feature Models) ---")
+
         all_test_image_paths = [os.path.join(DFIRE_TEST_IMAGES_DIR_EVAL, f) for f in os.listdir(DFIRE_TEST_IMAGES_DIR_EVAL) if f.lower().endswith(DFIRE_CONFIG_EVAL['img_extensions'])]
-        all_test_image_paths.sort() 
+        all_test_image_paths.sort() # Ensure consistent order
+
         fire_images_for_display = []
         non_fire_images_for_display = []
 
@@ -881,23 +756,39 @@ if global_scaler_obj_eval:
             else:
                 non_fire_images_for_display.append(img_path)
 
-        num_samples_to_show = min(3, len(fire_images_for_display))
+        num_samples_to_show = min(3, len(fire_images_for_display)) # Show up to 3 examples
         if num_samples_to_show > 0:
             print(f"\n--- Processing {num_samples_to_show} sample FIRE images for display ---")
             for i in range(num_samples_to_show):
-                process_single_image_feature_model_eval(fire_images_for_display[i], DFIRE_TEST_LABELS_DIR_EVAL, loaded_artifacts_eval, DFIRE_CONFIG_EVAL, get_feature_params(), global_scaler_obj_eval)
+                process_single_image_feature_model_eval(
+                    fire_images_for_display[i],
+                    DFIRE_TEST_LABELS_DIR_EVAL,
+                    loaded_artifacts_eval,
+                    DFIRE_CONFIG_EVAL,
+                    feature_params_eval,
+                    global_scaler_obj_eval
+                )
         else:
             print("\nNo fire images found in the test set for single image processing.")
 
-        num_samples_to_show = min(3, len(non_fire_images_for_display))
+        num_samples_to_show = min(3, len(non_fire_images_for_display)) # Show up to 3 examples
         if num_samples_to_show > 0:
             print(f"\n--- Processing {num_samples_to_show} sample NON-FIRE images for display ---")
             for i in range(num_samples_to_show):
-                process_single_image_feature_model_eval(non_fire_images_for_display[i], DFIRE_TEST_LABELS_DIR_EVAL, loaded_artifacts_eval, DFIRE_CONFIG_EVAL, get_feature_params(), global_scaler_obj_eval)
+                process_single_image_feature_model_eval(
+                    non_fire_images_for_display[i],
+                    DFIRE_TEST_LABELS_DIR_EVAL,
+                    loaded_artifacts_eval,
+                    DFIRE_CONFIG_EVAL,
+                    feature_params_eval,
+                    global_scaler_obj_eval
+                )
         else:
             print("\nNo non-fire images found in the test set for single image processing.")
+
     else:
         print("No feature-based models were loaded successfully. Skipping feature-based evaluation tasks.")
 else:
     print("Cannot proceed with feature-based model evaluation due to missing global scaler.")
+
 print("\n--- All D-Fire Feature-Based Model Evaluations Complete ---")
